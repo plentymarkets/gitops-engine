@@ -29,6 +29,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	testcore "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/pager"
 	"sigs.k8s.io/yaml"
 
 	"github.com/argoproj/gitops-engine/pkg/utils/kube"
@@ -334,6 +335,65 @@ func TestGetChildren(t *testing.T) {
 			Time: testCreationTime.Local(),
 		},
 	}}, rsChildren...), deployChildren)
+}
+
+func TestListResourcesWithLabelSelector(t *testing.T) {
+	scheme := runtime.NewScheme()
+	err := corev1.AddToScheme(scheme)
+	require.NoError(t, err)
+
+	ignoredResource := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ignored-resource",
+			Namespace: "default",
+			Labels: map[string]string{
+				"plenty.rocks/argo-cd-ignored": "true",
+			},
+		},
+	}
+
+	notIgnoredResource := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "not-ignored-resource",
+			Namespace: "default",
+		},
+	}
+
+	fakeClient := fake.NewSimpleDynamicClient(scheme, ignoredResource, notIgnoredResource)
+	cluster := newCluster(t)
+	ctx := context.Background()
+
+	_, err = cluster.listResources(ctx, fakeClient.Resource(schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}), func(listPager *pager.ListPager) error {
+		labelSelectorString, err := createLabelSelector()
+		if err != nil {
+			return err
+		}
+
+		listOptions := metav1.ListOptions{
+			LabelSelector: labelSelectorString,
+		}
+
+		return listPager.EachListItem(context.Background(), listOptions, func(obj runtime.Object) error {
+			un, ok := obj.(*unstructured.Unstructured)
+			if !ok {
+				return fmt.Errorf("object has an unexpected type: %T", obj)
+			}
+			cluster.setNode(cluster.newResource(un))
+			return nil
+		})
+	})
+
+	require.NoError(t, err)
+
+	assert.Len(t, cluster.resources, 1, "There should be only one resource in the cache")
+
+	for _, resource := range cluster.resources {
+		assert.Equal(t, "not-ignored-resource", resource.Ref.Name, "The resource in the cache should be 'not-ignored-resource'")
+	}
+
+	ignoredKey := kube.NewResourceKey("", "ConfigMap", "default", "ignored-resource")
+	_, exists := cluster.resources[ignoredKey]
+	assert.False(t, exists, "Ignored resource should not be in the cluster cache")
 }
 
 func TestGetManagedLiveObjs(t *testing.T) {

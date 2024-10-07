@@ -579,12 +579,21 @@ func (c *clusterCache) listResources(ctx context.Context, resClient dynamic.Reso
 func (c *clusterCache) loadInitialState(ctx context.Context, api kube.APIResourceInfo, resClient dynamic.ResourceInterface, ns string, lock bool) (string, error) {
 	var items []*Resource
 	resourceVersion, err := c.listResources(ctx, resClient, func(listPager *pager.ListPager) error {
-		return listPager.EachListItem(ctx, metav1.ListOptions{}, func(obj runtime.Object) error {
-			if un, ok := obj.(*unstructured.Unstructured); !ok {
+		labelSelectorString, err := createLabelSelector()
+		if err != nil {
+			return err
+		}
+
+		listOptions := metav1.ListOptions{
+			LabelSelector: labelSelectorString,
+		}
+
+		return listPager.EachListItem(ctx, listOptions, func(obj runtime.Object) error {
+			un, ok := obj.(*unstructured.Unstructured)
+			if !ok {
 				return fmt.Errorf("object %s/%s has an unexpected type", un.GroupVersionKind().String(), un.GetName())
-			} else {
-				items = append(items, c.newResource(un))
 			}
+			items = append(items, c.newResource(un))
 			return nil
 		})
 	})
@@ -806,6 +815,25 @@ func (c *clusterCache) checkPermission(ctx context.Context, reviewInterface auth
 	return true, nil
 }
 
+func createLabelSelector() (string, error) {
+	labelSelector := metav1.LabelSelector{
+		MatchExpressions: []metav1.LabelSelectorRequirement{
+			{
+				Key:      "plenty.rocks/argo-cd-ignored",
+				Operator: metav1.LabelSelectorOpNotIn,
+				Values:   []string{"true"},
+			},
+		},
+	}
+
+	selector, err := metav1.LabelSelectorAsSelector(&labelSelector)
+	if err != nil {
+		return "", fmt.Errorf("error creating label selector: %v", err)
+	}
+
+	return selector.String(), nil
+}
+
 // sync retrieves the current state of the cluster and stores relevant information in the clusterCache fields.
 //
 // First we get some metadata from the cluster, like the server version, OpenAPI document, and the list of all API
@@ -878,14 +906,23 @@ func (c *clusterCache) sync() error {
 
 		return c.processApi(client, api, func(resClient dynamic.ResourceInterface, ns string) error {
 			resourceVersion, err := c.listResources(ctx, resClient, func(listPager *pager.ListPager) error {
-				return listPager.EachListItem(context.Background(), metav1.ListOptions{}, func(obj runtime.Object) error {
-					if un, ok := obj.(*unstructured.Unstructured); !ok {
+				labelSelectorString, err := createLabelSelector()
+				if err != nil {
+					return err
+				}
+
+				listOptions := metav1.ListOptions{
+					LabelSelector: labelSelectorString,
+				}
+
+				return listPager.EachListItem(context.Background(), listOptions, func(obj runtime.Object) error {
+					un, ok := obj.(*unstructured.Unstructured)
+					if !ok {
 						return fmt.Errorf("object %s/%s has an unexpected type", un.GroupVersionKind().String(), un.GetName())
-					} else {
-						lock.Lock()
-						c.setNode(c.newResource(un))
-						lock.Unlock()
 					}
+					lock.Lock()
+					c.setNode(c.newResource(un))
+					lock.Unlock()
 					return nil
 				})
 			})
